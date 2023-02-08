@@ -43,7 +43,7 @@ def cleanText(resumeText):
     return resumeText
 
 
-def get_similarity(resume, description):
+def get_similarity(resume, description, type_of_value="string"):
     resume_data = pdf_reader(resume)
     resume_data = cleanText(resume_data)
 
@@ -58,4 +58,7 @@ def get_similarity(resume, description):
     matchPercentage = cosine_similarity(count_matrix)[0][1] * 100
     matchPercentage = round(matchPercentage, 2)
 
-    return str(matchPercentage) + "%"
+    if (type_of_value == "string"):
+        return str(matchPercentage) + "%"
+    else:
+        return matchPercentage

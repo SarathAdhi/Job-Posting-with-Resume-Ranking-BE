@@ -44,6 +44,27 @@ def home():
     return redirect('/')
 
 
+@app.route("/auth/login", methods=['POST'])
+def login_user():
+    if request.method == 'POST':
+
+        user = request.get_json()
+
+        if user['email'] == "":
+            return jsonify({'error': "Email is required"}), 400
+        if user['password'] == "":
+            return jsonify({'error': "Password is required"}), 400
+
+        isUserExist = user_collection.find_one(
+            {"email": user['email'], "password": user['password']})
+
+        if isUserExist is None:
+            return jsonify({'error': "Invalid credentials"}), 401
+
+        uuid = parse_json(isUserExist)['uuid']
+        return jsonify({'message': "Login Successfully", 'token': uuid})
+
+
 @app.route("/auth/register", methods=['POST'])
 def register_user():
     if request.method == 'POST':
@@ -77,25 +98,27 @@ def register_user():
             return jsonify({'error': "Something went wrong"}), 404
 
 
-@app.route("/auth/login", methods=['POST'])
-def login_user():
+@app.route("/upload/resume", methods=['POST'])
+def upload_resume():
     if request.method == 'POST':
 
-        user = request.get_json()
+        resume = request.files['resume']
 
-        if user['email'] == "":
-            return jsonify({'error': "Email is required"}), 400
-        if user['password'] == "":
-            return jsonify({'error': "Password is required"}), 400
+        filePath = os.path.join("./UPLOADED_RESUME/", resume.filename)
 
-        isUserExist = user_collection.find_one(
-            {"email": user['email'], "password": user['password']})
+        resume.save(filePath)
 
-        if isUserExist is None:
-            return jsonify({'error': "Invalid credentials"}), 401
+        user_uuid = request.form['uuid']
 
-        uuid = parse_json(isUserExist)['uuid']
-        return jsonify({'message': "Login Successfully", 'token': uuid})
+        myquery = {'uuid': user_uuid}
+        newvalues = {
+            "$set": {"resume": "./UPLOADED_RESUME/" + resume.filename}}
+
+        try:
+            user_collection.update_one(myquery, newvalues, upsert=False)
+            return jsonify({'message': "Resume uploaded Successfully"})
+        except:
+            return jsonify({'error': "Something went wrong"}), 404
 
 
 @app.route("/profile")
@@ -172,6 +195,67 @@ def get_job(job_id):
         return jsonify({'error': "Something went wrong"}), 400
 
 
+@app.route("/jobs/analytics/<job_id>")
+def get_job_analytics(job_id):
+
+    try:
+        job = job_collection.find_one({'_id': ObjectId(job_id)})
+
+        if job is None:
+            return jsonify({'error': "Job not found"}), 400
+
+        job['_id'] = str(job['_id'])
+        job['owner'] = user_collection.find_one({
+            '_id': job['owner']
+        })
+
+        job['_id'] = str(job['_id'])
+        job['owner']['_id'] = str(job['owner']['_id'])
+
+        del job['owner']['password']
+
+        all_candidates = []
+
+        for candidate in job['candidates']:
+            candidate_details = user_collection.find_one({
+                '_id': candidate
+            })
+            candidate_details['_id'] = str(candidate_details['_id'])
+
+            result = get_similarity(
+                candidate_details["resume"], job['description'], type_of_value="number")
+
+            candidate_details['score'] = result
+
+            del candidate_details['password']
+            all_candidates.append(candidate_details)
+
+        job["candidates"] = all_candidates
+
+        job = parse_json(job)
+
+        return job
+    except:
+        return jsonify({'error': "Something went wrong"}), 400
+
+
+@app.route("/company/jobs/<company_id>")
+def get_company_jobs(company_id):
+
+    print(company_id)
+    allJobs = []
+
+    try:
+        jobs = job_collection.find({'companyId': str(company_id)})
+        for job in jobs:
+            job['_id'] = str(job['_id'])
+            allJobs.append(job)
+
+        return jsonpickle.encode(allJobs)
+    except:
+        return jsonify({'error': "Something went wrong"}), 400
+
+
 @app.route("/job/create", methods=['POST'])
 def create_job():
     if request.method == 'POST':
@@ -184,6 +268,32 @@ def create_job():
             return jsonify({'message': "Job posted successfully"})
         except:
             return jsonify({'error': "Something went wrong while posting job"})
+
+
+@app.route("/job/apply/<job_id>", methods=['POST'])
+def apply_job(job_id):
+
+    user = request.get_json()
+    user_id = user['_id']
+
+    print(user_id)
+
+    myquery = {'_id': ObjectId(job_id)}
+    newvalues = {
+        "$push": {"candidates": ObjectId(user_id)}}
+
+    job = job_collection.find_one(
+        {'_id': ObjectId(job_id), 'candidates': {'$in': [ObjectId(user_id)]}})
+
+    if job is not None:
+        return jsonify({'error': "Already Applied to the job"}), 401
+
+    try:
+        job_collection.update_one(myquery, newvalues, upsert=False)
+        return jsonify({'message': "Applied Successfully"})
+
+    except:
+        return jsonify({'error': "Something went wrong"}), 400
 
 
 @app.route("/job/similarity", methods=['POST'])
@@ -203,15 +313,6 @@ def job_similarity():
         result = get_similarity(filePath, job_description)
 
         return jsonify({'data': result})
-
-        # job = request.get_json()
-        # job['owner'] = ObjectId(job['owner'])
-
-        # try:
-        #     job_collection.insert_one(job)
-        #     return jsonify({'message': "Job posted successfully"})
-        # except:
-        #     return jsonify({'error': "Something went wrong while posting job"})
 
 
 @app.route('/submit', methods=['POST'])
