@@ -1,28 +1,15 @@
 import json
 import os
 from pyresparser import ResumeParser
-from flask import render_template, redirect, request, jsonify, make_response
-import pandas as pd
-import re
-from ftfy import fix_text
-from nltk.corpus import stopwords
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.neighbors import NearestNeighbors
-from pandas import DataFrame
+from flask import render_template, redirect, request, jsonify
 from bson import json_util
 from bson.objectid import ObjectId
 import jsonpickle
 
-from db import user_collection, job_collection, write_new_pdf
+from db import user_collection, job_collection
 from application import app
 from job_similarity import get_similarity
-
-
-stopw = set(stopwords.words('english'))
-
-df = pd.read_csv('./others/job_final.csv')
-df['test'] = df['Job_Description'].apply(lambda x: ' '.join(
-    [word for word in str(x).split() if len(word) > 2 and word not in (stopw)]))
+from my_jobs import my_jobs
 
 
 def parse_json(data):
@@ -71,6 +58,8 @@ def register_user():
 
         user = request.get_json()
 
+        print(user)
+
         if user['email'] == "":
             return jsonify({'error': "Email is required"}), 400
         if user['password'] == "":
@@ -103,6 +92,12 @@ def upload_resume():
     if request.method == 'POST':
 
         resume = request.files['resume']
+        prev_filepath = request.form['prev_filepath']
+
+        print(prev_filepath)
+
+        if os.path.isfile(prev_filepath):
+            os.remove(prev_filepath)
 
         filePath = os.path.join("./UPLOADED_RESUME/", resume.filename)
 
@@ -146,6 +141,26 @@ def profile():
         return ""
 
 
+@app.route("/profile/update", methods=['POST'])
+def profile_update():
+    user = request.get_json()
+    user_id = user['_id']
+
+    del user["_id"]
+    del user["uuid"]
+    del user["email"]
+
+    myquery = {'_id': ObjectId(user_id)}
+    newvalues = {"$set": user}
+
+    try:
+        user_collection.update_one(myquery, newvalues, upsert=False)
+        return jsonify({'message': "Updated Profile"})
+
+    except:
+        return jsonify({'error': "Something went wrong"}), 400
+
+
 @app.route("/jobs")
 def get_jobs():
 
@@ -187,7 +202,16 @@ def get_job(job_id):
         job['_id'] = str(job['_id'])
         job['owner']['_id'] = str(job['owner']['_id'])
 
+        all_candidates = []
+
+        for candidate in job['candidates']:
+            cand_id = str(candidate)
+            all_candidates.append(cand_id)
+
+        job["candidates"] = all_candidates
+
         del job['owner']['password']
+
         job = parse_json(job)
 
         return job
@@ -223,7 +247,7 @@ def get_job_analytics(job_id):
             candidate_details['_id'] = str(candidate_details['_id'])
 
             result = get_similarity(
-                candidate_details["resume"], job['description'], type_of_value="number")
+                candidate_details["resume"], job['description'], "number")
 
             candidate_details['score'] = result
 
@@ -236,7 +260,7 @@ def get_job_analytics(job_id):
 
         return job
     except:
-        return jsonify({'error': "Something went wrong"}), 400
+        return jsonify({'error': "Something went wrong here"}), 400
 
 
 @app.route("/company/jobs/<company_id>")
@@ -299,82 +323,37 @@ def apply_job(job_id):
 @app.route("/job/similarity", methods=['POST'])
 def job_similarity():
     if request.method == 'POST':
-        resume = request.files['resume']
+        res = request.get_json()
 
-        filePath = os.path.join("./UPLOADED_RESUME/", resume.filename)
-
-        resume.save(filePath)
-
-        job_id = request.form['jobId']
-
-        job = job_collection.find_one({'_id': ObjectId(job_id)})
+        job = job_collection.find_one({'_id': ObjectId(res["job_id"])})
         job_description = job["description"]
 
-        result = get_similarity(filePath, job_description)
+        result = get_similarity(res["resume"], job_description)
 
         return jsonify({'data': result})
 
 
-@app.route('/submit', methods=['POST'])
+@app.route('/job/suggestions')
 def submit_data():
-    if request.method == 'POST':
 
-        f = request.files['userfile']
-        f.save(f.filename)
+    token = ""
 
-        print(f.name)
+    if 'Authorization' in request.headers:
+        token = request.headers['Authorization']
+        token = token.split(" ")[1]
+        print(token)
 
-        data = ResumeParser(f.filename).get_extracted_data()
+    user = user_collection.find_one({'uuid': token})
 
-        resume = data['skills']
-        print(type(resume))
+    filePath = os.path.join(user["resume"])
+    data = ResumeParser(filePath).get_extracted_data()
 
-        skills = []
-        skills.append(' '.join(word for word in resume))
-        org_name_clean = skills
+    resume = data['skills']
 
-        def ngrams(string, n=3):
-            string = fix_text(string)  # fix text
-            # remove non ascii chars
-            string = string.encode("ascii", errors="ignore").decode()
-            string = string.lower()
-            chars_to_remove = [")", "(", ".", "|", "[", "]", "{", "}", "'"]
-            rx = '[' + re.escape(''.join(chars_to_remove)) + ']'
-            string = re.sub(rx, '', string)
-            string = string.replace('&', 'and')
-            string = string.replace(',', ' ')
-            string = string.replace('-', ' ')
-            string = string.title()  # normalise case - capital at start of each word
-            # get rid of multiple spaces and replace with a single
-            string = re.sub(' +', ' ', string).strip()
-            string = ' ' + string + ' '  # pad names for ngrams...
-            string = re.sub(r'[,-./]|\sBD', r'', string)
-            ngrams = zip(*[string[i:] for i in range(n)])
-            return [''.join(ngram) for ngram in ngrams]
-        vectorizer = TfidfVectorizer(
-            min_df=1, analyzer=ngrams, lowercase=False)
-        tfidf = vectorizer.fit_transform(org_name_clean)
-        print('Vecorizing completed...')
+    skills = []
+    skills.append(' '.join(word for word in resume))
+    org_name_clean = skills
 
-        def getNearestN(query):
-            queryTFIDF_ = vectorizer.transform(query)
-            distances, indices = nbrs.kneighbors(queryTFIDF_)
-            return distances, indices
-        nbrs = NearestNeighbors(n_neighbors=1, n_jobs=-1).fit(tfidf)
-        unique_org = (df['test'].values)
-        distances, indices = getNearestN(unique_org)
-        unique_org = list(unique_org)
-        matches = []
-        for i, j in enumerate(indices):
-            dist = round(distances[i][0], 2)
+    df2 = my_jobs(org_name_clean)
 
-            temp = [dist]
-            matches.append(temp)
-        matches = pd.DataFrame(matches, columns=['Match confidence'])
-        df['match'] = matches['Match confidence']
-        df1 = df.sort_values('match')
-        df2 = df1[['Position', 'Company', 'Location']].head(10).reset_index()
-
-    # return  'nothing'
-    # return render_template('suggested-jobs.html', tables=[df2.to_html(classes='job')], titles=['na', 'Job'])
-    return df2.to_json()
+    return df2
